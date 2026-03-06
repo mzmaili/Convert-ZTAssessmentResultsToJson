@@ -1,5 +1,8 @@
 # Convert-ZTAssessmentResultsToJson
 
+You can access this page using: https://aka.ms/ZTAssess2Json
+
+## What is Convert-ZTAssessmentResultsToJson?
 The **Convert-ZTAssessmentResultsToJson** PowerShell script designed to enhabce Zero Trust Workshop delivery by allowing security experts to Zero Trust Assessment HTML test results and converts them into a structured JSON file grouped by pillar, suitable for import into the Zero Trust Workshop.
 
 ## Prerequisites
@@ -83,5 +86,6 @@ The script produces a JSON file with the following structure:
 
 ## Submit feedback
 To submit feedback, suggestions, or comments, please fill out [this form](https://forms.microsoft.com/Pages/ResponsePage.aspx?id=v4j5cvGGr0GRqy180BHbRz52p4S9AVBArxDJwc93Sh1UQzFSNFBRV0ZXTVVUU0xLWU9BWDZPWkpLMC4u).
+
 
 

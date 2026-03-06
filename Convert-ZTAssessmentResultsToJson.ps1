@@ -10,11 +10,7 @@ param(
     [string]$OutputFilePath = './output.json',
 
     [Parameter(Mandatory = $false)]
-    [string[]]$KnownPillars = @('identity', 'devices', 'data', 'network', 'infrastructure', 'security-ops', 'ai'),
-
-    [Parameter(Mandatory = $false)]
-    [ValidateSet('UseTestId', 'Skip', 'Error')]
-    [string]$UnmappedIdBehavior = 'UseTestId'
+    [string[]]$KnownPillars = @('identity', 'devices', 'data', 'network', 'infrastructure', 'security-ops', 'ai')
 )
 
 Set-StrictMode -Version Latest
@@ -88,14 +84,22 @@ if (-not [System.IO.Path]::IsPathRooted($MappingFilePath)) {
     $MappingFilePath = Join-Path $scriptDir $MappingFilePath
 }
 Write-Host "Looking for mapping file at: $MappingFilePath"
-$mapping = @{}
+$pillarMappings = @{}  # pillar -> hashtable of TestId -> OverrideId
+$hasMappingFile = $false
 if (Test-Path -LiteralPath $MappingFilePath) {
     try {
         $mappingContent = Get-Content -LiteralPath $MappingFilePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        foreach ($prop in $mappingContent.PSObject.Properties) {
-            $mapping[$prop.Name] = $prop.Value
+        $totalEntries = 0
+        foreach ($pillarProp in $mappingContent.PSObject.Properties) {
+            $pillarKey = $pillarProp.Name.ToLower()
+            $pillarMappings[$pillarKey] = @{}
+            foreach ($testProp in $pillarProp.Value.PSObject.Properties) {
+                $pillarMappings[$pillarKey][$testProp.Name] = $testProp.Value
+                $totalEntries++
+            }
         }
-        Write-Host "Loaded mapping file with $($mapping.Count) entries."
+        $hasMappingFile = $true
+        Write-Host "Loaded mapping file with $totalEntries entries across $($pillarMappings.Count) pillars."
     }
     catch {
         Write-Warning "Failed to parse mapping file '$MappingFilePath'. Falling back to using TestId directly. Error: $_"
@@ -126,17 +130,20 @@ foreach ($test in $tests) {
     }
     $seenTestIds[$testId] = $true
 
-    # Resolve override key — only include tests that have a mapping
-    if ($mapping.Count -gt 0 -and $mapping.ContainsKey($testId)) {
-        $overrideId = $mapping[$testId]
-    }
-    elseif ($mapping.Count -eq 0) {
-        # No mapping file loaded — use TestId directly
-        $overrideId = $testId
+    # Resolve override key — look up in the pillar-specific mapping
+    if ($hasMappingFile) {
+        $pillarMap = if ($pillarMappings.ContainsKey($pillarKey)) { $pillarMappings[$pillarKey] } else { @{} }
+        if ($pillarMap.ContainsKey($testId)) {
+            $overrideId = $pillarMap[$testId]
+        }
+        else {
+            # TestId has no mapping in this pillar — skip it
+            continue
+        }
     }
     else {
-        # TestId has no mapping — skip it
-        continue
+        # No mapping file loaded — use TestId directly
+        $overrideId = $testId
     }
 
     # Extract notes: text between first \n and second \n

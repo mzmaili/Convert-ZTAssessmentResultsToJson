@@ -31,25 +31,34 @@ The **Convert-ZTAssessmentResultsToJson** PowerShell script designed to enhabce 
 | Parameter | Required | Default | Description |
 |---|---|---|---|
 | `-HtmlFilePath` | Yes | — | Path to the input HTML file containing test results. |
-| `-MappingFilePath` | No | `./test-mapping.json` | Path to TestId→TaskOverride JSON mapping file. Falls back to using TestId directly if not found. |
+| `-MappingFilePath` | No | `./test-mapping.json` | Path to TestId→TaskOverride JSON mapping file. Relative paths are resolved against the script's directory. Falls back to using TestId directly if not found. |
 | `-OutputFilePath` | No | `./output.json` | Path for the generated JSON output. |
 | `-KnownPillars` | No | `identity, devices, data, network, infrastructure, security-ops, ai` | List of pillars to always include in the output. |
 
 ## Mapping File
 
-The mapping file (`test-mapping.json`) maps numeric TestIds from the HTML input to human-readable TaskOverride keys:
+The mapping file (`test-mapping.json`) is organized **by pillar**, mapping numeric TestIds to human-readable TaskOverride keys:
 
 ```json
 {
-  "21941": "RMI_001",
-  "21892": "RMI_001",
-  "21803": "RMI_052"
+  "identity": {
+    "21941": "RMI_001",
+    "21892": "RMI_001",
+    "21803": "RMI_052"
+  },
+  "devices": {},
+  "data": {},
+  "network": {},
+  "infrastructure": {},
+  "security-ops": {},
+  "ai": {}
 }
 ```
 
+- Each pillar has its own section, so mappings are scoped per pillar.
 - Multiple TestIds can map to the same override key — their notes will be combined.
 - If the mapping file is not found, the script falls back to using TestId values directly.
-- Tests without a mapping entry are skipped when a mapping file is loaded.
+- Tests without a mapping entry in their pillar are skipped when a mapping file is loaded.
 
 ## Output
 
@@ -86,6 +95,4 @@ The script produces a JSON file with the following structure:
 
 ## Submit feedback
 To submit feedback, suggestions, or comments, please fill out [this form](https://forms.microsoft.com/Pages/ResponsePage.aspx?id=v4j5cvGGr0GRqy180BHbRz52p4S9AVBArxDJwc93Sh1UQzFSNFBRV0ZXTVVUU0xLWU9BWDZPWkpLMC4u).
-
-
 

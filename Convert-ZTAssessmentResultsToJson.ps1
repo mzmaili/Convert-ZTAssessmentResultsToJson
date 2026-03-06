@@ -1,0 +1,267 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$HtmlFilePath,
+
+    [Parameter(Mandatory = $false)]
+    [string]$MappingFilePath = './test-mapping.json',
+
+    [Parameter(Mandatory = $false)]
+    [string]$OutputFilePath = './output.json',
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$KnownPillars = @('identity', 'devices', 'data', 'network', 'infrastructure', 'security-ops', 'ai'),
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('UseTestId', 'Skip', 'Error')]
+    [string]$UnmappedIdBehavior = 'UseTestId'
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# --- 1. Validate and read the HTML file ---
+if (-not (Test-Path -LiteralPath $HtmlFilePath)) {
+    Write-Error "HTML file not found: $HtmlFilePath"
+    return
+}
+
+$htmlContent = Get-Content -LiteralPath $HtmlFilePath -Raw -Encoding UTF8
+
+# --- 2. Extract the Tests JSON array ---
+# Use bracket-balancing to find the full array, skipping characters inside JSON strings
+$testsMatch = [regex]::Match($htmlContent, '"Tests"\s*:\s*\[')
+if (-not $testsMatch.Success) {
+    Write-Error "Failed to extract 'Tests' array from the HTML file. No matching JSON block found."
+    return
+}
+
+$arrayStart = $testsMatch.Index + $testsMatch.Length - 1  # index of the opening [
+$depth = 0
+$arrayEnd = -1
+$inString = $false
+for ($i = $arrayStart; $i -lt $htmlContent.Length; $i++) {
+    $ch = $htmlContent[$i]
+    if ($inString) {
+        if ($ch -eq '\' ) {
+            $i++  # skip escaped character
+        }
+        elseif ($ch -eq '"') {
+            $inString = $false
+        }
+    }
+    else {
+        if ($ch -eq '"') { $inString = $true }
+        elseif ($ch -eq '[') { $depth++ }
+        elseif ($ch -eq ']') {
+            $depth--
+            if ($depth -eq 0) {
+                $arrayEnd = $i
+                break
+            }
+        }
+    }
+}
+
+if ($arrayEnd -lt 0) {
+    Write-Error "Failed to extract 'Tests' array from the HTML file. Unterminated array."
+    return
+}
+
+$arrayJson = $htmlContent.Substring($arrayStart, $arrayEnd - $arrayStart + 1)
+$jsonString = '{{"Tests": {0}}}' -f $arrayJson
+
+try {
+    $parsed = $jsonString | ConvertFrom-Json
+    $tests = @($parsed.Tests)
+    Write-Host "Extracted $($tests.Count) tests from the HTML file."
+}
+catch {
+    Write-Error "Failed to parse extracted JSON: $_"
+    return
+}
+
+# --- 3. Load the mapping file ---
+# Resolve relative MappingFilePath against the script's directory
+if (-not [System.IO.Path]::IsPathRooted($MappingFilePath)) {
+    $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    $MappingFilePath = Join-Path $scriptDir $MappingFilePath
+}
+Write-Host "Looking for mapping file at: $MappingFilePath"
+$mapping = @{}
+if (Test-Path -LiteralPath $MappingFilePath) {
+    try {
+        $mappingContent = Get-Content -LiteralPath $MappingFilePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($prop in $mappingContent.PSObject.Properties) {
+            $mapping[$prop.Name] = $prop.Value
+        }
+        Write-Host "Loaded mapping file with $($mapping.Count) entries."
+    }
+    catch {
+        Write-Warning "Failed to parse mapping file '$MappingFilePath'. Falling back to using TestId directly. Error: $_"
+    }
+}
+else {
+    Write-Warning "Mapping file not found: $MappingFilePath. Falling back to using TestId directly as the override key."
+}
+
+# --- 4. Initialize pillars ---
+$pillars = [ordered]@{}
+foreach ($p in $KnownPillars) {
+    $pillars[$p] = [ordered]@{ taskOverrides = [ordered]@{} }
+}
+
+# --- 5. Process each test ---
+$seenTestIds = @{}
+$modifiedCount = 0
+$collectedNotes = @{}
+
+foreach ($test in $tests) {
+    $testId = [string]$test.TestId
+    $pillarKey = ($test.TestPillar).ToLower()
+
+    # Duplicate detection
+    if ($seenTestIds.ContainsKey($testId)) {
+        Write-Warning "Duplicate TestId '$testId' found. The later entry will overwrite the earlier one."
+    }
+    $seenTestIds[$testId] = $true
+
+    # Resolve override key — only include tests that have a mapping
+    if ($mapping.Count -gt 0 -and $mapping.ContainsKey($testId)) {
+        $overrideId = $mapping[$testId]
+    }
+    elseif ($mapping.Count -eq 0) {
+        # No mapping file loaded — use TestId directly
+        $overrideId = $testId
+    }
+    else {
+        # TestId has no mapping — skip it
+        continue
+    }
+
+    # Extract notes: text between first \n and second \n
+    # ConvertFrom-Json converts JSON \n escapes to actual newlines,
+    # but handle both real newlines and literal \n just in case
+    $testResult = $test.TestResult
+    $notesText = ''
+    if ($null -ne $testResult -and $testResult.Length -gt 0) {
+        # Determine the newline delimiter present in the string
+        if ($testResult.Contains("`n")) {
+            $nl = "`n"
+        }
+        elseif ($testResult.Contains('\n')) {
+            $nl = '\n'
+        }
+        else {
+            $nl = $null
+        }
+
+        if ($null -ne $nl) {
+            # Split on the delimiter and find the first non-empty line after the leading delimiter
+            $parts = $testResult.Split($nl)
+            foreach ($part in $parts) {
+                $trimmed = $part.Trim()
+                if ($trimmed.Length -gt 0) {
+                    $notesText = $trimmed
+                    break
+                }
+            }
+        }
+        else {
+            # No newline at all — use entire trimmed TestResult
+            $notesText = $testResult.Trim()
+        }
+    }
+
+    # Ensure pillar exists
+    if (-not $pillars.Contains($pillarKey)) {
+        $pillars[$pillarKey] = [ordered]@{ taskOverrides = [ordered]@{} }
+    }
+
+    # Collect notes per overrideId — combine all mapped TestResults (skip empty)
+    if ($notesText.Length -gt 0) {
+        $noteKey = "$pillarKey|$overrideId"
+        if (-not $collectedNotes.ContainsKey($noteKey)) {
+            $collectedNotes[$noteKey] = [System.Collections.Generic.List[string]]::new()
+        }
+        $collectedNotes[$noteKey].Add($notesText)
+    }
+
+    # Track which pillar/overrideId combos exist
+    if (-not $pillars[$pillarKey].taskOverrides.Contains($overrideId)) {
+        $pillars[$pillarKey].taskOverrides[$overrideId] = [ordered]@{
+            status = 'not-reviewed'
+            notes  = ''
+        }
+        $modifiedCount++
+    }
+}
+
+# --- 6. Combine collected notes into final notes values ---
+foreach ($noteKey in $collectedNotes.Keys) {
+    $parts = $noteKey -split '\|', 2
+    $pKey = $parts[0]
+    $oKey = $parts[1]
+    $combined = ($collectedNotes[$noteKey]) -join "`n"
+    $pillars[$pKey].taskOverrides[$oKey].notes = "ZT Assessment result:`n$combined`n"
+}
+
+# --- 7. Compute statistics ---
+$pillarsWithChanges = @()
+foreach ($pKey in $pillars.Keys) {
+    if ($pillars[$pKey].taskOverrides.Count -gt 0) {
+        $pillarsWithChanges += $pKey
+    }
+}
+
+$timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+
+# --- 7. Build the full output structure ---
+$output = [ordered]@{
+    metadata      = [ordered]@{
+        version            = '1.0.0'
+        formatVersion      = '1.0'
+        exportedAt         = $timestamp
+        applicationVersion = '1.0.0'
+        exportType         = 'full-configuration'
+        scope              = 'all'
+        description        = 'Zero Trust Assessment Result Export'
+    }
+    configuration = [ordered]@{
+        applicationState = [ordered]@{
+            currentPillar = 'identity'
+            lastModified  = $timestamp
+        }
+        pillars          = $pillars
+        globalSettings   = [ordered]@{
+            preferences = [ordered]@{
+                autoSave            = $true
+                confirmationDialogs = $true
+            }
+        }
+    }
+    statistics    = [ordered]@{
+        totalTasks         = @($tests).Count
+        modifiedTasks      = $modifiedCount
+        completedTasks     = 0
+        inProgressTasks    = 0
+        plannedTasks       = 0
+        pillarsWithChanges = $pillarsWithChanges
+    }
+}
+
+# --- 8. Write output ---
+$jsonOutput = $output | ConvertTo-Json -Depth 10
+# Convert 4-space indentation to 2-space indentation
+$jsonOutput = ($jsonOutput -split "`n" | ForEach-Object {
+    if ($_ -match '^( +)') {
+        $spaces = $Matches[1]
+        $newIndent = ' ' * [math]::Floor($spaces.Length / 2)
+        $newIndent + $_.TrimStart()
+    } else {
+        $_
+    }
+}) -join "`n"
+$jsonOutput | Out-File -LiteralPath $OutputFilePath -Encoding UTF8 -Force
+
+Write-Host "Output written to: $OutputFilePath"

@@ -19,8 +19,8 @@ The **Convert-ZTAssessmentResultsToJson** PowerShell script designed to enhabce 
 ```powershell
 .\Convert-ZTAssessmentResultsToJson.ps1 `
     -HtmlFilePath "C:\Reports\ZeroTrustAssessmentReport.html" `
-    -MappingFilePath "C:\Config\test-mapping.json" `
-    -OutputFilePath "C:\Output\output.json"
+    -MappingFilePath ".\test-mapping.json" `
+    -OutputFilePath ".\output.json"
 ```
 
 ## Parameters
@@ -83,4 +83,5 @@ The script produces a JSON file with the following structure:
 
 ## Submit feedback
 To submit feedback, suggestions, or comments, please fill out [this form](https://forms.microsoft.com/Pages/ResponsePage.aspx?id=v4j5cvGGr0GRqy180BHbRz52p4S9AVBArxDJwc93Sh1UQzFSNFBRV0ZXTVVUU0xLWU9BWDZPWkpLMC4u).
+
 

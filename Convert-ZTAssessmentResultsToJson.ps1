@@ -84,17 +84,25 @@ if (-not [System.IO.Path]::IsPathRooted($MappingFilePath)) {
     $MappingFilePath = Join-Path $scriptDir $MappingFilePath
 }
 Write-Host "Looking for mapping file at: $MappingFilePath"
-$pillarMappings = @{}  # pillar -> hashtable of TestId -> OverrideId
+$pillarMappings = @{}  # pillar -> hashtable of TestId -> list of OverrideIds
 $hasMappingFile = $false
 if (Test-Path -LiteralPath $MappingFilePath) {
     try {
-        $mappingContent = Get-Content -LiteralPath $MappingFilePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        # Parse manually with regex to support duplicate keys (ConvertFrom-Json drops duplicates)
+        $rawMapping = Get-Content -LiteralPath $MappingFilePath -Raw -Encoding UTF8
         $totalEntries = 0
-        foreach ($pillarProp in $mappingContent.PSObject.Properties) {
-            $pillarKey = $pillarProp.Name.ToLower()
+        $pillarRegex = [regex]'"([^"]+)"\s*:\s*\{([^}]*)\}'
+        $entryRegex  = [regex]'"([^"]+)"\s*:\s*"([^"]+)"'
+        foreach ($pillarMatch in $pillarRegex.Matches($rawMapping)) {
+            $pillarKey = $pillarMatch.Groups[1].Value.ToLower()
             $pillarMappings[$pillarKey] = @{}
-            foreach ($testProp in $pillarProp.Value.PSObject.Properties) {
-                $pillarMappings[$pillarKey][$testProp.Name] = $testProp.Value
+            foreach ($entryMatch in $entryRegex.Matches($pillarMatch.Groups[2].Value)) {
+                $tid = $entryMatch.Groups[1].Value
+                $oid = $entryMatch.Groups[2].Value
+                if (-not $pillarMappings[$pillarKey].ContainsKey($tid)) {
+                    $pillarMappings[$pillarKey][$tid] = [System.Collections.Generic.List[string]]::new()
+                }
+                $pillarMappings[$pillarKey][$tid].Add($oid)
                 $totalEntries++
             }
         }
@@ -116,7 +124,6 @@ foreach ($p in $KnownPillars) {
 }
 
 # --- 5. Process each test ---
-$seenTestIds = @{}
 $modifiedCount = 0
 $collectedNotes = @{}
 
@@ -124,17 +131,11 @@ foreach ($test in $tests) {
     $testId = [string]$test.TestId
     $pillarKey = ($test.TestPillar).ToLower()
 
-    # Duplicate detection
-    if ($seenTestIds.ContainsKey($testId)) {
-        Write-Warning "Duplicate TestId '$testId' found. The later entry will overwrite the earlier one."
-    }
-    $seenTestIds[$testId] = $true
-
-    # Resolve override key — look up in the pillar-specific mapping
+    # Resolve override keys — look up in the pillar-specific mapping
     if ($hasMappingFile) {
         $pillarMap = if ($pillarMappings.ContainsKey($pillarKey)) { $pillarMappings[$pillarKey] } else { @{} }
         if ($pillarMap.ContainsKey($testId)) {
-            $overrideId = $pillarMap[$testId]
+            $overrideIds = $pillarMap[$testId]
         }
         else {
             # TestId has no mapping in this pillar — skip it
@@ -143,7 +144,7 @@ foreach ($test in $tests) {
     }
     else {
         # No mapping file loaded — use TestId directly
-        $overrideId = $testId
+        $overrideIds = @($testId)
     }
 
     # Extract notes: text between first \n and second \n
@@ -185,22 +186,24 @@ foreach ($test in $tests) {
         $pillars[$pillarKey] = [ordered]@{ taskOverrides = [ordered]@{} }
     }
 
-    # Collect notes per overrideId — combine all mapped TestResults (skip empty)
-    if ($notesText.Length -gt 0) {
-        $noteKey = "$pillarKey|$overrideId"
-        if (-not $collectedNotes.ContainsKey($noteKey)) {
-            $collectedNotes[$noteKey] = [System.Collections.Generic.List[string]]::new()
+    foreach ($overrideId in $overrideIds) {
+        # Collect notes per overrideId — combine all mapped TestResults (skip empty)
+        if ($notesText.Length -gt 0) {
+            $noteKey = "$pillarKey|$overrideId"
+            if (-not $collectedNotes.ContainsKey($noteKey)) {
+                $collectedNotes[$noteKey] = [System.Collections.Generic.List[string]]::new()
+            }
+            $collectedNotes[$noteKey].Add($notesText)
         }
-        $collectedNotes[$noteKey].Add($notesText)
-    }
 
-    # Track which pillar/overrideId combos exist
-    if (-not $pillars[$pillarKey].taskOverrides.Contains($overrideId)) {
-        $pillars[$pillarKey].taskOverrides[$overrideId] = [ordered]@{
-            status = 'not-reviewed'
-            notes  = ''
+        # Track which pillar/overrideId combos exist
+        if (-not $pillars[$pillarKey].taskOverrides.Contains($overrideId)) {
+            $pillars[$pillarKey].taskOverrides[$overrideId] = [ordered]@{
+                status = 'not-reviewed'
+                notes  = ''
+            }
+            $modifiedCount++
         }
-        $modifiedCount++
     }
 }
 
